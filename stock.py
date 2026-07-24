@@ -17,7 +17,7 @@ DATA_DIR = BASE_DIR / "data"
 st.write("项目目录：", str(BASE_DIR))
 st.write("data目录存在：", DATA_DIR.exists())
 
-st.stop()
+
 
 
 # ===================== 文件配置 =====================
@@ -609,7 +609,13 @@ with st.sidebar:
         st.rerun()
 
 sku_df = init_sku_table()
+st.success(f"SKU读取完成：{len(sku_df)} 行")
+
 supply_df = init_supply_table()
+st.success(f"供应链读取完成：{len(supply_df)} 行")
+
+st.stop()
+
 df_calc = build_inventory_calc(
     sku_df, supply_df, base_today,
     global_purchase, global_ship, global_customs,
