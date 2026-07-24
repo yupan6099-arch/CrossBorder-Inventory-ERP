@@ -780,8 +780,8 @@ with tab_sku:
 with tab_gantt:
     st.subheader("📊 单SKU未来库存销售时间线")
     st.caption(
-        "为避免切换SKU时立即执行大量日期与图表计算，"
-        "现在改为先选择SKU，再点击按钮加载测算结果。"
+        "选择SKU并提交后才执行测算。切换下拉选项不会立即触发大量计算，"
+        "避免页面因重复重算或异常数据而黑屏。"
     )
 
     if df_calc.empty:
@@ -798,242 +798,234 @@ with tab_gantt:
         if not sku_options:
             st.warning("没有有效SKU可供选择。")
         else:
-            selected_sku = st.selectbox(
-                "选择SKU",
-                sku_options,
-                key="gantt_selected_sku",
-            )
+            # 固定状态键，不再按SKU动态创建大量session_state键
+            if "gantt_result_ready" not in st.session_state:
+                st.session_state["gantt_result_ready"] = False
+            if "gantt_active_sku" not in st.session_state:
+                st.session_state["gantt_active_sku"] = sku_options[0]
+            if "gantt_active_sales" not in st.session_state:
+                st.session_state["gantt_active_sales"] = 0.0
+            if "gantt_active_reorder_qty" not in st.session_state:
+                st.session_state["gantt_active_reorder_qty"] = 0.0
+            if "gantt_show_chart" not in st.session_state:
+                st.session_state["gantt_show_chart"] = False
 
-            load_key = f"gantt_loaded_sku_{selected_sku}"
-            if load_key not in st.session_state:
-                st.session_state[load_key] = False
+            default_index = 0
+            if st.session_state["gantt_active_sku"] in sku_options:
+                default_index = sku_options.index(st.session_state["gantt_active_sku"])
 
-            action_col1, action_col2 = st.columns([1, 4])
-            with action_col1:
-                if st.button(
-                    "加载该SKU测算",
-                    key=f"load_gantt_{selected_sku}",
-                    width="stretch",
-                ):
-                    st.session_state[load_key] = True
-            with action_col2:
-                if st.session_state[load_key]:
-                    st.success(f"已加载 SKU：{selected_sku}")
+            # 使用表单：改变SKU时不立即重跑整段测算
+            with st.form("gantt_control_form", clear_on_submit=False):
+                selected_sku_form = st.selectbox(
+                    "选择SKU",
+                    sku_options,
+                    index=default_index,
+                )
+
+                selected_rows = df_calc[
+                    df_calc["SKU编码"].fillna("").astype(str).str.strip()
+                    == str(selected_sku_form).strip()
+                ]
+
+                if selected_rows.empty:
+                    selected_daily_sales_default = 0.0
+                    selected_reorder_default = 0.0
                 else:
-                    st.info("选择SKU后，请点击“加载该SKU测算”。")
+                    selected_target = selected_rows.iloc[0]
+                    selected_daily_sales_default = max(
+                        0.0, safe_num(selected_target.get("日均销量"))
+                    )
+                    saved_reorder_qty = max(
+                        0.0, safe_num(selected_target.get("计划返单数量"))
+                    )
+                    selected_reorder_default = (
+                        saved_reorder_qty
+                        if saved_reorder_qty > 0
+                        else selected_daily_sales_default
+                        * (
+                            global_safety_days
+                            + platform_stock_days
+                            + reorder_turnover_days
+                        )
+                    )
 
-            if st.session_state[load_key]:
+                input_daily_sales = st.number_input(
+                    "日均销量",
+                    min_value=0.0,
+                    value=float(selected_daily_sales_default),
+                    step=0.1,
+                    help="用于换算每个库存批次可覆盖的销售天数。",
+                )
+                input_reorder_qty = st.number_input(
+                    "计划返单库存数量",
+                    min_value=0.0,
+                    value=float(selected_reorder_default),
+                    step=1.0,
+                    help="用于计算计划返单库存的销售覆盖时间。",
+                )
+
+                submitted = st.form_submit_button(
+                    "开始测算",
+                    width="stretch",
+                )
+
+            if submitted:
+                st.session_state["gantt_active_sku"] = str(selected_sku_form).strip()
+                st.session_state["gantt_active_sales"] = float(input_daily_sales)
+                st.session_state["gantt_active_reorder_qty"] = float(input_reorder_qty)
+                st.session_state["gantt_result_ready"] = True
+                st.session_state["gantt_show_chart"] = False
+
+            if st.session_state["gantt_result_ready"]:
+                selected_sku = st.session_state["gantt_active_sku"]
+                gantt_daily_sales = float(st.session_state["gantt_active_sales"])
+                manual_reorder_qty = float(
+                    st.session_state["gantt_active_reorder_qty"]
+                )
+
                 try:
                     target_rows = df_calc[
                         df_calc["SKU编码"].fillna("").astype(str).str.strip()
-                        == str(selected_sku).strip()
+                        == selected_sku
                     ]
 
                     if target_rows.empty:
-                        st.error("所选SKU在计算结果中不存在，请刷新页面后重试。")
+                        st.error("所选SKU在计算结果中不存在，请重新选择。")
+                    elif gantt_daily_sales <= 0:
+                        st.warning("日均销量必须大于0。")
+                    elif gantt_daily_sales < 0.01:
+                        st.warning("日均销量过小，请至少设置为0.01。")
                     else:
                         target = target_rows.iloc[0]
-
-                        sales_col, save_col = st.columns([4, 1])
-                        with sales_col:
-                            gantt_daily_sales = st.number_input(
-                                "日均销量（修改后立即重新测算全部库存销售区间）",
-                                min_value=0.0,
-                                value=float(target["日均销量"]),
-                                step=0.1,
-                                key=f"gantt_daily_sales_{selected_sku}",
-                            )
-                        with save_col:
-                            st.write("")
-                            st.write("")
-                            if st.button(
-                                "💾 保存日均销量",
-                                key=f"save_sales_{selected_sku}",
-                                width="stretch",
-                            ):
-                                sku_update = init_sku_table()
-                                sku_update.loc[
-                                    sku_update["SKU编码"].astype(str) == str(selected_sku),
-                                    "日均销量"
-                                ] = gantt_daily_sales
-                                save_sku_df(sku_update)
-                                st.success("日均销量已保存")
-                                st.rerun()
-
-                        default_reorder_qty = float(
-                            target["计划返单数量"]
-                            if "计划返单数量" in target.index
-                            and pd.notna(target["计划返单数量"])
-                            and float(target["计划返单数量"]) > 0
-                            else gantt_daily_sales
-                            * (
-                                global_safety_days
-                                + platform_stock_days
-                                + reorder_turnover_days
-                            )
+                        current_available = max(
+                            0.0, safe_num(target.get("可售现货库存"))
                         )
+                        lead_days = (
+                            global_purchase + global_ship + global_customs
+                        )
+                        timeline_rows = []
 
-                        reorder_input_col, reorder_save_col = st.columns([4, 1])
-                        with reorder_input_col:
-                            manual_reorder_qty = st.number_input(
-                                "计划返单库存数量",
-                                min_value=0.0,
-                                value=default_reorder_qty,
-                                step=1.0,
-                                key=f"manual_reorder_qty_{selected_sku}",
+                        # 当前可售现货
+                        if current_available > 0:
+                            current_days = current_available / gantt_daily_sales
+                            timeline_rows.append({
+                                "库存位置": "当前可售现货",
+                                "状态": "当前现货",
+                                "批次标识": "当前现货合计",
+                                "库存数量": current_available,
+                                "预计可售日期": pd.Timestamp(base_today),
+                                "预计销售结束": safe_future_timestamp(
+                                    base_today, current_days
+                                ),
+                                "可销售天数": current_days,
+                                "优先级": 0,
+                            })
+
+                        # 在途批次
+                        sku_batches = supply_df[
+                            supply_df["公司SKU"]
+                            .fillna("")
+                            .astype(str)
+                            .str.strip()
+                            == selected_sku
+                        ].copy()
+
+                        valid_statuses = ["采购途中", "海运途中", "入full途中"]
+                        sku_batches = sku_batches[
+                            sku_batches["是否入仓"].isin(valid_statuses)
+                        ].copy()
+
+                        status_priority = {
+                            "入full途中": 1,
+                            "海运途中": 2,
+                            "采购途中": 3,
+                        }
+
+                        for idx, row in sku_batches.iterrows():
+                            status = clean_text(row.get("是否入仓"))
+                            qty = max(0.0, float(batch_quantity(row)))
+                            if qty <= 0:
+                                continue
+
+                            available_date = expected_available_date_for_batch(
+                                row=row,
+                                status=status,
+                                base_today=base_today,
+                                purchase_days=global_purchase,
+                                ship_days=global_ship,
+                                customs_days=global_customs,
                             )
-                        with reorder_save_col:
-                            st.write("")
-                            st.write("")
-                            if st.button(
-                                "💾 保存返单数量",
-                                key=f"save_reorder_qty_{selected_sku}",
-                                width="stretch",
-                            ):
-                                sku_update = init_sku_table()
-                                sku_update.loc[
-                                    sku_update["SKU编码"].astype(str) == str(selected_sku),
-                                    "计划返单数量"
-                                ] = manual_reorder_qty
-                                save_sku_df(sku_update)
-                                st.success("计划返单数量已保存")
-                                st.rerun()
+                            sales_days = qty / gantt_daily_sales
+                            shipment = (
+                                clean_text(row.get("Shipment ID"))
+                                or clean_text(row.get("入仓号/留仓号"))
+                                or f"批次{idx + 1}"
+                            )
 
-                        if gantt_daily_sales <= 0:
-                            st.warning("请将日均销量设置为大于0。")
-                        elif gantt_daily_sales < 0.01:
-                            st.warning("日均销量过小，请至少设置为0.01。")
+                            timeline_rows.append({
+                                "库存位置": f"{status}｜{shipment}",
+                                "状态": status,
+                                "批次标识": shipment,
+                                "库存数量": qty,
+                                "预计可售日期": pd.Timestamp(available_date),
+                                "预计销售结束": safe_future_timestamp(
+                                    available_date, sales_days
+                                ),
+                                "可销售天数": sales_days,
+                                "优先级": status_priority.get(status, 9),
+                            })
+
+                        if not timeline_rows:
+                            st.warning("该SKU没有可用于测算的现货或在途批次。")
                         else:
-                            current_available = float(target["可售现货库存"])
-                            lead_days = (
-                                global_purchase + global_ship + global_customs
-                            )
-                            timeline_rows = []
+                            timeline_df = pd.DataFrame(timeline_rows)
+                            timeline_df = timeline_df.sort_values(
+                                ["预计可售日期", "优先级", "预计销售结束"],
+                                kind="stable",
+                            ).reset_index(drop=True)
 
-                            if current_available > 0:
-                                current_days = current_available / gantt_daily_sales
-                                timeline_rows.append({
-                                    "库存位置": "当前可售现货",
-                                    "状态": "当前现货",
-                                    "批次标识": "当前现货合计",
-                                    "库存数量": current_available,
-                                    "预计可售日期": pd.Timestamp(base_today),
-                                    "预计销售结束": safe_future_timestamp(
-                                        base_today, current_days
-                                    ),
-                                    "可销售天数": current_days,
-                                    "优先级": 0,
-                                })
-
-                            sku_batches = supply_df[
-                                supply_df["公司SKU"]
-                                .fillna("")
-                                .astype(str)
-                                .str.strip()
-                                == str(selected_sku).strip()
-                            ].copy()
-
-                            valid_statuses = [
-                                "采购途中", "海运途中", "入full途中"
+                            # 返单衔接优先级
+                            source_candidates = timeline_df[
+                                timeline_df["状态"] == "采购途中"
                             ]
-                            sku_batches = sku_batches[
-                                sku_batches["是否入仓"].isin(valid_statuses)
-                            ].copy()
+                            source_name = "最新采购在途"
 
-                            status_priority = {
-                                "入full途中": 1,
-                                "海运途中": 2,
-                                "采购途中": 3,
-                            }
-
-                            for idx, row in sku_batches.iterrows():
-                                status = row["是否入仓"]
-                                qty = float(batch_quantity(row))
-                                if qty <= 0:
-                                    continue
-
-                                available_date = expected_available_date_for_batch(
-                                    row=row,
-                                    status=status,
-                                    base_today=base_today,
-                                    purchase_days=global_purchase,
-                                    ship_days=global_ship,
-                                    customs_days=global_customs,
-                                )
-                                sales_days = qty / gantt_daily_sales
-                                shipment = (
-                                    clean_text(row.get("Shipment ID"))
-                                    or clean_text(row.get("入仓号/留仓号"))
-                                    or f"批次{idx + 1}"
-                                )
-
-                                timeline_rows.append({
-                                    "库存位置": f"{status}｜{shipment}",
-                                    "状态": status,
-                                    "批次标识": shipment,
-                                    "库存数量": qty,
-                                    "预计可售日期": pd.Timestamp(available_date),
-                                    "预计销售结束": safe_future_timestamp(
-                                        available_date, sales_days
-                                    ),
-                                    "可销售天数": sales_days,
-                                    "优先级": status_priority.get(status, 9),
-                                })
-
-                            if not timeline_rows:
-                                st.warning("该SKU没有可绘制的现货或在途批次。")
-                            else:
-                                timeline_df = pd.DataFrame(timeline_rows)
-                                timeline_df = timeline_df.sort_values(
-                                    [
-                                        "预计可售日期",
-                                        "优先级",
-                                        "预计销售结束",
-                                    ],
-                                    kind="stable",
-                                ).reset_index(drop=True)
-
+                            if source_candidates.empty:
                                 source_candidates = timeline_df[
-                                    timeline_df["状态"] == "采购途中"
+                                    timeline_df["状态"] == "海运途中"
                                 ]
-                                source_name = "最新采购在途"
+                                source_name = "最新海运在途"
 
-                                if source_candidates.empty:
-                                    source_candidates = timeline_df[
-                                        timeline_df["状态"] == "海运途中"
-                                    ]
-                                    source_name = "最新海运在途"
+                            if source_candidates.empty:
+                                source_candidates = timeline_df
+                                source_name = "当前最新库存"
 
-                                if source_candidates.empty:
-                                    source_candidates = timeline_df
-                                    source_name = "当前最新库存"
+                            connection_source = source_candidates.sort_values(
+                                ["预计可售日期", "预计销售结束"],
+                                kind="stable",
+                            ).iloc[-1]
 
-                                connection_source = source_candidates.sort_values(
-                                    ["预计可售日期", "预计销售结束"],
-                                    kind="stable",
-                                ).iloc[-1]
+                            planned_arrival = (
+                                connection_source["预计销售结束"]
+                                - pd.Timedelta(days=global_safety_days)
+                            )
+                            reorder_deadline = (
+                                planned_arrival - pd.Timedelta(days=lead_days)
+                            )
 
-                                planned_arrival = (
-                                    connection_source["预计销售结束"]
-                                    - pd.Timedelta(days=global_safety_days)
-                                )
-                                reorder_deadline = (
-                                    planned_arrival
-                                    - pd.Timedelta(days=lead_days)
-                                )
-                                reorder_qty = float(manual_reorder_qty)
-                                reorder_sales_days = (
-                                    reorder_qty / gantt_daily_sales
-                                    if reorder_qty > 0
-                                    else 0
-                                )
-                                reorder_sales_end = safe_future_timestamp(
-                                    planned_arrival,
-                                    reorder_sales_days,
-                                )
+                            reorder_qty = max(0.0, manual_reorder_qty)
+                            reorder_sales_days = (
+                                reorder_qty / gantt_daily_sales
+                                if reorder_qty > 0
+                                else 0.0
+                            )
+                            reorder_sales_end = safe_future_timestamp(
+                                planned_arrival, reorder_sales_days
+                            )
 
-                                if reorder_qty > 0:
-                                    timeline_df = pd.concat([
+                            if reorder_qty > 0:
+                                timeline_df = pd.concat(
+                                    [
                                         timeline_df,
                                         pd.DataFrame([{
                                             "库存位置": "计划返单库存",
@@ -1044,198 +1036,220 @@ with tab_gantt:
                                             "预计销售结束": reorder_sales_end,
                                             "可销售天数": reorder_sales_days,
                                             "优先级": 4,
-                                        }])
-                                    ], ignore_index=True)
-
-                                timeline_df = timeline_df.sort_values(
-                                    [
-                                        "预计可售日期",
-                                        "优先级",
-                                        "预计销售结束",
+                                        }]),
                                     ],
-                                    kind="stable",
-                                ).reset_index(drop=True)
+                                    ignore_index=True,
+                                )
 
-                                coverage_end = None
-                                check_rows = []
-                                gap_ranges = []
-                                overlap_ranges = []
+                            timeline_df = timeline_df.sort_values(
+                                ["预计可售日期", "优先级", "预计销售结束"],
+                                kind="stable",
+                            ).reset_index(drop=True)
 
-                                for _, row in timeline_df.iterrows():
-                                    start_date = row["预计可售日期"]
-                                    end_date = row["预计销售结束"]
+                            # 库存衔接检查
+                            coverage_end = None
+                            check_rows = []
+                            gap_ranges = []
+                            overlap_ranges = []
 
-                                    if coverage_end is None:
-                                        relation = "起始库存"
-                                    elif start_date <= coverage_end:
-                                        overlap_days = max(
-                                            0.0,
+                            for _, row in timeline_df.iterrows():
+                                start_date = pd.Timestamp(row["预计可售日期"])
+                                end_date = pd.Timestamp(row["预计销售结束"])
+
+                                if coverage_end is None:
+                                    relation = "起始库存"
+                                elif start_date <= coverage_end:
+                                    overlap_days = max(
+                                        0.0,
+                                        (
+                                            coverage_end - start_date
+                                        ).total_seconds() / 86400,
+                                    )
+                                    relation = f"🟢 重合 {overlap_days:.1f} 天"
+                                    if overlap_days > 0:
+                                        overlap_ranges.append(
                                             (
-                                                coverage_end - start_date
-                                            ).total_seconds() / 86400,
-                                        )
-                                        relation = (
-                                            f"🟢 重合 {overlap_days:.1f} 天"
-                                        )
-                                        if overlap_days > 0:
-                                            overlap_ranges.append(
-                                                (
-                                                    start_date,
-                                                    min(coverage_end, end_date),
-                                                )
+                                                start_date,
+                                                min(coverage_end, end_date),
                                             )
-                                    else:
-                                        gap_days = (
-                                            start_date - coverage_end
-                                        ).total_seconds() / 86400
-                                        relation = (
-                                            f"🔴 断货 {gap_days:.1f} 天"
                                         )
-                                        gap_ranges.append(
-                                            (coverage_end, start_date)
-                                        )
-
-                                    coverage_end = (
-                                        end_date
-                                        if coverage_end is None
-                                        else max(coverage_end, end_date)
+                                else:
+                                    gap_days = (
+                                        start_date - coverage_end
+                                    ).total_seconds() / 86400
+                                    relation = f"🔴 断货 {gap_days:.1f} 天"
+                                    gap_ranges.append(
+                                        (coverage_end, start_date)
                                     )
 
-                                    check_rows.append({
-                                        "库存位置/批次": row["库存位置"],
-                                        "状态": row["状态"],
-                                        "库存数量": round(
-                                            float(row["库存数量"]), 1
-                                        ),
-                                        "预计可售日期": start_date.strftime(
-                                            "%Y-%m-%d"
-                                        ),
-                                        "预计销售结束": end_date.strftime(
-                                            "%Y-%m-%d"
-                                        ),
-                                        "可销售天数": round(
-                                            float(row["可销售天数"]), 1
-                                        ),
-                                        "与前序库存关系": relation,
-                                    })
-
-                                stockout_days = sum(
-                                    (b - a).total_seconds() / 86400
-                                    for a, b in gap_ranges
-                                )
-                                overlap_days_total = sum(
-                                    (b - a).total_seconds() / 86400
-                                    for a, b in overlap_ranges
+                                coverage_end = (
+                                    end_date
+                                    if coverage_end is None
+                                    else max(coverage_end, end_date)
                                 )
 
-                                st.markdown("#### 📦 计划返单库存测算")
-                                rq1, rq2, rq3, rq4 = st.columns(4)
-                                rq1.metric(
-                                    "计划返单数量",
-                                    round(reorder_qty, 1),
-                                )
-                                rq2.metric(
-                                    "返单库存可售天数",
-                                    round(reorder_sales_days, 1),
-                                )
-                                rq3.metric(
-                                    "计划到货日期",
-                                    planned_arrival.strftime("%Y-%m-%d"),
-                                )
-                                rq4.metric(
-                                    "返单库存销售结束",
-                                    reorder_sales_end.strftime("%Y-%m-%d")
-                                    if reorder_qty > 0
-                                    else "无",
-                                )
+                                check_rows.append({
+                                    "库存位置/批次": row["库存位置"],
+                                    "状态": row["状态"],
+                                    "库存数量": round(
+                                        float(row["库存数量"]), 1
+                                    ),
+                                    "预计可售日期": start_date.strftime(
+                                        "%Y-%m-%d"
+                                    ),
+                                    "预计销售结束": end_date.strftime(
+                                        "%Y-%m-%d"
+                                    ),
+                                    "可销售天数": round(
+                                        float(row["可销售天数"]), 1
+                                    ),
+                                    "与前序库存关系": relation,
+                                })
 
-                                m1, m2, m3, m4, m5 = st.columns(5)
-                                m1.metric(
-                                    "日均销量",
-                                    round(gantt_daily_sales, 2),
-                                )
-                                m2.metric("返单衔接依据", source_name)
-                                m3.metric(
-                                    "最晚返单日期",
-                                    reorder_deadline.strftime("%Y-%m-%d"),
-                                )
-                                m4.metric(
-                                    "预计断货合计",
-                                    f"{stockout_days:.1f} 天",
-                                )
-                                m5.metric(
-                                    "库存重合合计",
-                                    f"{overlap_days_total:.1f} 天",
-                                )
+                            stockout_days = sum(
+                                (b - a).total_seconds() / 86400
+                                for a, b in gap_ranges
+                            )
+                            overlap_days_total = sum(
+                                (b - a).total_seconds() / 86400
+                                for a, b in overlap_ranges
+                            )
 
-                                st.markdown("#### 🔍 库存衔接检查")
-                                st.dataframe(
-                                    pd.DataFrame(check_rows),
+                            st.success(f"SKU {selected_sku} 测算完成")
+
+                            # 保存按钮固定key，不使用SKU动态key
+                            save_col1, save_col2 = st.columns(2)
+                            with save_col1:
+                                if st.button(
+                                    "💾 保存当前日均销量",
+                                    key="gantt_save_sales",
                                     width="stretch",
-                                    hide_index=True,
+                                ):
+                                    sku_update = init_sku_table()
+                                    sku_update.loc[
+                                        sku_update["SKU编码"]
+                                        .fillna("")
+                                        .astype(str)
+                                        .str.strip()
+                                        == selected_sku,
+                                        "日均销量",
+                                    ] = gantt_daily_sales
+                                    save_sku_df(sku_update)
+                                    st.success("日均销量已保存")
+                            with save_col2:
+                                if st.button(
+                                    "💾 保存当前返单数量",
+                                    key="gantt_save_reorder",
+                                    width="stretch",
+                                ):
+                                    sku_update = init_sku_table()
+                                    sku_update.loc[
+                                        sku_update["SKU编码"]
+                                        .fillna("")
+                                        .astype(str)
+                                        .str.strip()
+                                        == selected_sku,
+                                        "计划返单数量",
+                                    ] = reorder_qty
+                                    save_sku_df(sku_update)
+                                    st.success("计划返单数量已保存")
+
+                            st.markdown("#### 📦 计划返单库存测算")
+                            rq1, rq2, rq3, rq4 = st.columns(4)
+                            rq1.metric("计划返单数量", round(reorder_qty, 1))
+                            rq2.metric(
+                                "返单库存可售天数",
+                                round(reorder_sales_days, 1),
+                            )
+                            rq3.metric(
+                                "计划到货日期",
+                                planned_arrival.strftime("%Y-%m-%d"),
+                            )
+                            rq4.metric(
+                                "返单库存销售结束",
+                                reorder_sales_end.strftime("%Y-%m-%d")
+                                if reorder_qty > 0
+                                else "无",
+                            )
+
+                            m1, m2, m3, m4, m5 = st.columns(5)
+                            m1.metric(
+                                "日均销量",
+                                round(gantt_daily_sales, 2),
+                            )
+                            m2.metric("返单衔接依据", source_name)
+                            m3.metric(
+                                "最晚返单日期",
+                                reorder_deadline.strftime("%Y-%m-%d"),
+                            )
+                            m4.metric(
+                                "预计断货合计",
+                                f"{stockout_days:.1f} 天",
+                            )
+                            m5.metric(
+                                "库存重合合计",
+                                f"{overlap_days_total:.1f} 天",
+                            )
+
+                            st.markdown("#### 🔍 库存衔接检查")
+                            st.dataframe(
+                                pd.DataFrame(check_rows),
+                                width="stretch",
+                                hide_index=True,
+                            )
+
+                            # 固定toggle key
+                            st.session_state["gantt_show_chart"] = st.toggle(
+                                "显示甘特图",
+                                value=st.session_state["gantt_show_chart"],
+                                key="gantt_show_chart_toggle",
+                            )
+
+                            if st.session_state["gantt_show_chart"]:
+                                plot_df = timeline_df.copy()
+                                plot_df["标签"] = plot_df.apply(
+                                    lambda r: (
+                                        f"{r['库存位置']}｜"
+                                        f"{r['库存数量']:.0f}件｜"
+                                        f"{r['可销售天数']:.1f}天"
+                                    ),
+                                    axis=1,
                                 )
 
-                                show_chart = st.toggle(
-                                    "显示图形",
-                                    value=False,
-                                    key=f"show_chart_{selected_sku}",
+                                fig = px.timeline(
+                                    plot_df,
+                                    x_start="预计可售日期",
+                                    x_end="预计销售结束",
+                                    y="标签",
+                                    color="状态",
+                                )
+                                fig.update_yaxes(
+                                    autorange="reversed",
+                                    title=None,
+                                )
+                                fig.update_xaxes(
+                                    title="未来日期",
+                                    type="date",
+                                    tickformat="%Y-%m-%d",
+                                )
+                                fig.update_layout(
+                                    height=max(
+                                        520,
+                                        80 + len(plot_df) * 55,
+                                    ),
+                                    legend_title_text="库存状态",
+                                    margin=dict(l=20, r=20, t=40, b=20),
                                 )
 
-                                if show_chart:
-                                    plot_df = timeline_df.copy()
-                                    plot_df["标签"] = plot_df.apply(
-                                        lambda r: (
-                                            f"{r['库存位置']}｜"
-                                            f"{r['库存数量']:.0f}件｜"
-                                            f"{r['可销售天数']:.1f}天"
-                                        ),
-                                        axis=1,
-                                    )
-
-                                    fig = px.timeline(
-                                        plot_df,
-                                        x_start="预计可售日期",
-                                        x_end="预计销售结束",
-                                        y="标签",
-                                        color="状态",
-                                    )
-                                    fig.update_yaxes(
-                                        autorange="reversed",
-                                        title=None,
-                                    )
-                                    fig.update_xaxes(
-                                        title="未来日期",
-                                        type="date",
-                                        tickformat="%Y-%m-%d",
-                                    )
-                                    fig.update_layout(
-                                        height=max(
-                                            520,
-                                            80 + len(plot_df) * 55,
-                                        ),
-                                        legend_title_text="库存状态",
-                                        margin=dict(
-                                            l=20, r=20, t=40, b=20
-                                        ),
-                                    )
-
-                                    try:
-                                        st.plotly_chart(
-                                            fig,
-                                            width="stretch",
-                                            key=f"timeline_chart_{selected_sku}",
-                                        )
-                                    except Exception as chart_error:
-                                        st.error(
-                                            "该SKU图表无法渲染，"
-                                            "但测算结果仍然有效。"
-                                        )
-                                        st.exception(chart_error)
+                                st.plotly_chart(
+                                    fig,
+                                    width="stretch",
+                                    key="gantt_timeline_chart",
+                                )
 
                 except Exception as gantt_error:
                     st.error(
-                        "该SKU测算发生异常。页面不会再黑屏，"
-                        "请展开下方错误信息。"
+                        "该SKU测算发生异常。错误已被捕获，页面不会再黑屏。"
                     )
                     st.exception(gantt_error)
 
