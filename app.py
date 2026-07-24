@@ -1,4 +1,7 @@
+import streamlit as st
 
-# 入口文件
-# 启动命令：streamlit run app.py
-import stock
+st.set_page_config(layout="wide")
+
+st.title("APP OK")
+
+st.success("如果你看到这句话，说明 app.py 正常运行。")
