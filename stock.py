@@ -1,22 +1,23 @@
-import streamlit as st
-
-st.title("测试")
-
-st.success("第一页")
-
-st.stop()
 import os
 from io import BytesIO
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import plotly.figure_factory as ff
 import plotly.express as px
-from pathlib import Path
+
+st.title("测试")
+st.success("基础依赖加载成功")
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+
+st.write("项目目录：", str(BASE_DIR))
+st.write("data目录存在：", DATA_DIR.exists())
+
+st.stop()
 
 
 # ===================== 文件配置 =====================
