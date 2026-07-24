@@ -1,13 +1,14 @@
-
 import os
 from io import BytesIO
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import plotly.figure_factory as ff
 import plotly.express as px
-from pathlib import Path
+
+st.set_page_config(page_title="跨境库存ERP计划系统", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -397,6 +398,27 @@ def valid_business_date(value):
     return dt.date()
 
 
+MAX_TIMELINE_DATE = date(2100, 12, 31)
+MAX_TIMELINE_DAYS = 36500
+
+
+def safe_future_timestamp(start_value, days_value):
+    """安全计算甘特图结束日期，防止极小日销量导致日期溢出或页面黑屏。"""
+    start_ts = pd.Timestamp(start_value)
+    try:
+        days_float = float(days_value)
+    except (TypeError, ValueError):
+        days_float = 0.0
+
+    if pd.isna(days_float) or days_float < 0:
+        days_float = 0.0
+
+    days_float = min(days_float, float(MAX_TIMELINE_DAYS))
+    max_ts = pd.Timestamp(MAX_TIMELINE_DATE)
+    result = start_ts + pd.Timedelta(days=days_float)
+    return min(result, max_ts)
+
+
 def infer_batch_available_date(
     row,
     status,
@@ -551,7 +573,6 @@ def build_inventory_calc(
 
 
 # ===================== 页面 =====================
-st.set_page_config(page_title="跨境库存ERP计划系统", layout="wide")
 st.title("📦 跨境库存 ERP 计划系统")
 st.caption("SKU库存、采购途中、海运途中、入FULL途中及海外仓批次统一管理")
 
@@ -586,7 +607,7 @@ with st.sidebar:
     st.header("📥 数据导入")
 
     sku_upload = st.file_uploader("上传SKU库存表", type=["xlsx", "csv"], key="sku_upload")
-    if sku_upload is not None and st.button("导入SKU数据", use_container_width=True):
+    if sku_upload is not None and st.button("导入SKU数据", width="stretch"):
         result = batch_import_sku(sku_upload)
         st.success(f"SKU导入完成，共 {len(result)} 个SKU")
         st.rerun()
@@ -596,13 +617,14 @@ with st.sidebar:
         type=["xlsx"],
         key="supply_upload"
     )
-    if supply_upload is not None and st.button("导入并更新供应链批次", use_container_width=True):
+    if supply_upload is not None and st.button("导入并更新供应链批次", width="stretch"):
         result, imported_count = batch_import_supply(supply_upload)
         st.success(f"已读取 {imported_count} 行，合并后共 {len(result)} 条批次")
         st.rerun()
 
 sku_df = init_sku_table()
 supply_df = init_supply_table()
+
 df_calc = build_inventory_calc(
     sku_df, supply_df, base_today,
     global_purchase, global_ship, global_customs,
@@ -644,7 +666,7 @@ with tab_dashboard:
                     "SKU编码", "产品名称", "可售现货库存", "日均销量",
                     "预计售罄日期", "返单最晚截止日期", "距离必须返单剩余天数"
                 ]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -718,7 +740,7 @@ with tab_supply:
 
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=620,
         )
@@ -752,7 +774,7 @@ with tab_sku:
             )
         display["库存周转天数"] = pd.to_numeric(display["库存周转天数"], errors="coerce").round(1)
 
-        st.dataframe(display, use_container_width=True, hide_index=True, height=620)
+        st.dataframe(display, width="stretch", hide_index=True, height=620)
 
 # ===================== 甘特图 =====================
 with tab_gantt:
@@ -765,8 +787,28 @@ with tab_gantt:
     if df_calc.empty:
         st.info("暂无SKU数据。")
     else:
-        selected_sku = st.selectbox("选择SKU", df_calc["SKU编码"].astype(str).tolist())
-        target = df_calc[df_calc["SKU编码"].astype(str) == str(selected_sku)].iloc[0]
+        sku_options = (
+            df_calc["SKU编码"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        sku_options = sku_options[sku_options != ""].drop_duplicates().tolist()
+
+        if not sku_options:
+            st.warning("没有有效SKU可供选择。")
+            st.stop()
+
+        selected_sku = st.selectbox("选择SKU", sku_options)
+        target_rows = df_calc[
+            df_calc["SKU编码"].fillna("").astype(str).str.strip() == str(selected_sku).strip()
+        ]
+
+        if target_rows.empty:
+            st.error("所选SKU在计算结果中不存在，请刷新页面后重试。")
+            st.stop()
+
+        target = target_rows.iloc[0]
 
         sales_col, save_col = st.columns([4, 1])
         with sales_col:
@@ -781,7 +823,7 @@ with tab_gantt:
         with save_col:
             st.write("")
             st.write("")
-            if st.button("💾 保存日均销量", key=f"save_sales_{selected_sku}", use_container_width=True):
+            if st.button("💾 保存日均销量", key=f"save_sales_{selected_sku}", width="stretch"):
                 sku_update = init_sku_table()
                 sku_update.loc[
                     sku_update["SKU编码"].astype(str) == str(selected_sku),
@@ -820,7 +862,7 @@ with tab_gantt:
             if st.button(
                 "💾 保存返单数量",
                 key=f"save_reorder_qty_{selected_sku}",
-                use_container_width=True
+                width="stretch"
             ):
                 sku_update = init_sku_table()
                 sku_update.loc[
@@ -836,6 +878,8 @@ with tab_gantt:
 
         if gantt_daily_sales <= 0:
             st.warning("请先设置大于0的日均销量，系统才能换算销售覆盖时间。")
+        elif gantt_daily_sales < 0.01:
+            st.warning("日均销量过小，可能生成超长时间线。请将日均销量设置为至少 0.01。")
         else:
             timeline_rows = []
 
@@ -848,7 +892,7 @@ with tab_gantt:
                     "批次标识": "当前现货合计",
                     "库存数量": current_available,
                     "预计可售日期": pd.Timestamp(base_today),
-                    "预计销售结束": pd.Timestamp(base_today + timedelta(days=current_days)),
+                    "预计销售结束": safe_future_timestamp(base_today, current_days),
                     "可销售天数": current_days,
                     "优先级": 0,
                 })
@@ -887,7 +931,7 @@ with tab_gantt:
                     "批次标识": shipment,
                     "库存数量": qty,
                     "预计可售日期": pd.Timestamp(available_date),
-                    "预计销售结束": pd.Timestamp(available_date + timedelta(days=sales_days)),
+                    "预计销售结束": safe_future_timestamp(available_date, sales_days),
                     "可销售天数": sales_days,
                     "优先级": status_priority.get(status, 9),
                 })
@@ -923,7 +967,7 @@ with tab_gantt:
                     if gantt_daily_sales > 0 and reorder_qty > 0
                     else 0
                 )
-                reorder_sales_end = planned_arrival + pd.Timedelta(days=reorder_sales_days)
+                reorder_sales_end = safe_future_timestamp(planned_arrival, reorder_sales_days)
 
                 if reorder_qty > 0:
                     timeline_df = pd.concat([
@@ -946,6 +990,12 @@ with tab_gantt:
                     ["预计可售日期", "优先级", "预计销售结束"],
                     kind="stable"
                 ).reset_index(drop=True)
+
+                if (timeline_df["预计销售结束"] >= pd.Timestamp(MAX_TIMELINE_DATE)).any():
+                    st.warning(
+                        "部分库存覆盖时间过长，图表日期已限制到 2100-12-31。"
+                        "请检查该SKU的日均销量或库存数量。"
+                    )
 
                 st.markdown("#### 📦 计划返单库存测算")
                 rq1, rq2, rq3, rq4 = st.columns(4)
@@ -1004,66 +1054,119 @@ with tab_gantt:
                 m4.metric("预计断货合计", f"{stockout_days:.1f} 天")
                 m5.metric("库存重合合计", f"{overlap_days_total:.1f} 天")
 
-                st.markdown("#### 🗓️ 各位置库存销售覆盖时间")
-                plot_df = timeline_df.copy()
-                plot_df["标签"] = plot_df.apply(
-                    lambda r: f"{r['库存位置']}｜{r['库存数量']:.0f}件｜{r['可销售天数']:.1f}天",
-                    axis=1
+                show_gantt_chart = st.toggle(
+                    "显示甘特图",
+                    value=False,
+                    help="为避免部分SKU日期跨度过大导致页面卡顿，选择SKU后再手动开启图表。",
+                    key=f"show_gantt_{selected_sku}",
                 )
 
-                fig = px.timeline(
-                    plot_df,
-                    x_start="预计可售日期",
-                    x_end="预计销售结束",
-                    y="标签",
-                    color="状态",
-                    hover_data={
-                        "库存数量": ":.1f",
-                        "可销售天数": ":.1f",
-                        "预计可售日期": "|%Y-%m-%d",
-                        "预计销售结束": "|%Y-%m-%d",
-                        "批次标识": True,
-                        "标签": False,
-                    },
-                )
-                fig.update_yaxes(autorange="reversed", title=None)
-                fig.update_xaxes(
-                    title="未来日期",
-                    type="date",
-                    tickformat="%Y-%m-%d",
-                    rangeslider_visible=True,
-                )
-                fig.update_layout(
-                    height=max(520, 80 + len(plot_df) * 55),
-                    legend_title_text="库存状态",
-                    hovermode="closest",
-                    margin=dict(l=20, r=20, t=40, b=20),
-                )
-                fig.add_vline(
-                    x=pd.Timestamp(base_today).timestamp() * 1000,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="今天 TODAY",
-                    annotation_position="top",
-                )
-
-                for gap_start, gap_end in gap_ranges:
-                    fig.add_vrect(
-                        x0=gap_start,
-                        x1=gap_end,
-                        fillcolor="red",
-                        opacity=0.12,
-                        line_width=0,
-                        annotation_text=f"断货 {(gap_end-gap_start).total_seconds()/86400:.1f}天",
-                        annotation_position="top left",
+                if show_gantt_chart:
+                    st.markdown("#### 🗓️ 各位置库存销售覆盖时间")
+                    plot_df = timeline_df.copy()
+                    plot_df["标签"] = plot_df.apply(
+                        lambda r: f"{r['库存位置']}｜{r['库存数量']:.0f}件｜{r['可销售天数']:.1f}天",
+                        axis=1
                     )
 
-                st.plotly_chart(fig, use_container_width=True)
+                    fig = px.timeline(
+                        plot_df,
+                        x_start="预计可售日期",
+                        x_end="预计销售结束",
+                        y="标签",
+                        color="状态",
+                        custom_data=[
+                            "库存数量",
+                            "可销售天数",
+                            "批次标识",
+                            "预计可售日期",
+                            "预计销售结束",
+                        ],
+                    )
+                    fig.update_traces(
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "库存数量：%{customdata[0]:.1f}<br>"
+                            "可销售天数：%{customdata[1]:.1f}<br>"
+                            "批次标识：%{customdata[2]}<br>"
+                            "预计可售日期：%{customdata[3]|%Y-%m-%d}<br>"
+                            "预计销售结束：%{customdata[4]|%Y-%m-%d}"
+                            "<extra></extra>"
+                        )
+                    )
+                    fig.update_yaxes(autorange="reversed", title=None)
+                    fig.update_xaxes(
+                        title="未来日期",
+                        type="date",
+                        tickformat="%Y-%m-%d",
+                        rangeslider_visible=True,
+                    )
+                    fig.update_layout(
+                        height=max(520, 80 + len(plot_df) * 55),
+                        legend_title_text="库存状态",
+                        hovermode="closest",
+                        margin=dict(l=20, r=20, t=40, b=20),
+                    )
+                    today_ts = pd.Timestamp(base_today)
+                    fig.add_shape(
+                        type="line",
+                        x0=today_ts,
+                        x1=today_ts,
+                        y0=0,
+                        y1=1,
+                        xref="x",
+                        yref="paper",
+                        line=dict(color="red", dash="dash", width=2),
+                    )
+                    fig.add_annotation(
+                        x=today_ts,
+                        y=1,
+                        xref="x",
+                        yref="paper",
+                        text="今天 TODAY",
+                        showarrow=False,
+                        yshift=12,
+                    )
+
+                    for gap_start, gap_end in gap_ranges:
+                        gap_days_value = (gap_end - gap_start).total_seconds() / 86400
+                        fig.add_shape(
+                            type="rect",
+                            x0=gap_start,
+                            x1=gap_end,
+                            y0=0,
+                            y1=1,
+                            xref="x",
+                            yref="paper",
+                            fillcolor="red",
+                            opacity=0.12,
+                            line=dict(width=0),
+                            layer="below",
+                        )
+                        fig.add_annotation(
+                            x=gap_start,
+                            y=1,
+                            xref="x",
+                            yref="paper",
+                            text=f"断货 {gap_days_value:.1f}天",
+                            showarrow=False,
+                            xanchor="left",
+                            yshift=-12,
+                        )
+
+                    try:
+                        st.plotly_chart(fig, width="stretch")
+                    except Exception as chart_error:
+                        st.error("该SKU的甘特图无法渲染，但其他页面仍可继续使用。")
+                        st.exception(chart_error)
+
+                else:
+                    st.info("已完成库存时间测算。需要查看图形时，请开启“显示甘特图”。")
 
                 st.markdown("#### 🔍 库存衔接检查")
                 st.dataframe(
                     pd.DataFrame(check_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -1095,14 +1198,14 @@ with tab_export:
             data=to_excel_bytes(sku_template),
             file_name="SKU库存导入模板.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
         st.download_button(
             "导出SKU库存计划",
             data=to_excel_bytes(df_calc),
             file_name="跨境SKU库存返单测算.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
     with d2:
@@ -1111,12 +1214,12 @@ with tab_export:
             data=to_excel_bytes(supply_template),
             file_name="海运及转运货物明细模板.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
         st.download_button(
             "导出全部供应链批次",
             data=to_excel_bytes(supply_df),
             file_name="供应链批次完整备份.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
