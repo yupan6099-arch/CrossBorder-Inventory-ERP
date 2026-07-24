@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import plotly.figure_factory as ff
 import plotly.express as px
 
 st.set_page_config(page_title="跨境库存ERP计划系统", layout="wide")
@@ -95,6 +94,7 @@ def batch_quantity(row):
     return remaining if remaining > 0 else overseas
 
 
+@st.cache_data(show_spinner=False)
 def to_excel_bytes(df):
     buffer = BytesIO()
     df.to_excel(buffer, index=False)
@@ -631,12 +631,16 @@ df_calc = build_inventory_calc(
     global_safety_days, platform_stock_days, reorder_turnover_days
 )
 
-tab_dashboard, tab_supply, tab_sku, tab_gantt, tab_export = st.tabs([
-    "经营驾驶舱", "供应链批次总表", "SKU库存计划", "供应链甘特图", "导入导出"
-])
+active_page = st.radio(
+    "功能页面",
+    ["经营驾驶舱", "供应链批次总表", "SKU库存计划", "供应链甘特图", "导入导出"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="active_page",
+)
 
 # ===================== 经营驾驶舱 =====================
-with tab_dashboard:
+if active_page == "经营驾驶舱":
     if df_calc.empty:
         st.warning("暂无SKU数据，请先导入SKU库存表或供应链批次表。")
     else:
@@ -671,7 +675,7 @@ with tab_dashboard:
             )
 
 # ===================== 供应链批次总表 =====================
-with tab_supply:
+if active_page == "供应链批次总表":
     st.subheader("🚢 海运及转运货物明细")
     st.caption("采购、海运、海外仓、入FULL途中等状态集中在同一张表中。")
 
@@ -684,22 +688,60 @@ with tab_supply:
             if status in counts
         ]
 
-        c1, c2, c3 = st.columns([2.2, 1.4, 1.4])
-        with c1:
-            keyword = st.text_input(
-                "搜索",
-                placeholder="输入公司SKU、MSKU、中文品名、Shipment ID、入仓号、物流商"
+        channel_options = sorted(
+            [x for x in supply_df["渠道"].unique().tolist() if x]
+        )
+
+        if "supply_keyword" not in st.session_state:
+            st.session_state["supply_keyword"] = ""
+        if "supply_statuses" not in st.session_state:
+            st.session_state["supply_statuses"] = status_options
+        if "supply_channels" not in st.session_state:
+            st.session_state["supply_channels"] = channel_options
+
+        with st.form("supply_filter_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns([2.2, 1.4, 1.4])
+            with c1:
+                keyword_input = st.text_input(
+                    "搜索",
+                    value=st.session_state["supply_keyword"],
+                    placeholder="输入公司SKU、MSKU、中文品名、Shipment ID、入仓号、物流商",
+                )
+            with c2:
+                status_default = [
+                    value for value in st.session_state["supply_statuses"]
+                    if value in status_options
+                ]
+                selected_status_input = st.multiselect(
+                    "状态筛选",
+                    options=status_options,
+                    default=status_default,
+                    format_func=lambda x: f"{x} ({counts.get(x, 0)})",
+                )
+            with c3:
+                channel_default = [
+                    value for value in st.session_state["supply_channels"]
+                    if value in channel_options
+                ]
+                selected_channels_input = st.multiselect(
+                    "渠道",
+                    channel_options,
+                    default=channel_default,
+                )
+
+            apply_filters = st.form_submit_button(
+                "应用筛选",
+                width="stretch",
             )
-        with c2:
-            selected_status = st.multiselect(
-                "状态筛选",
-                options=status_options,
-                default=status_options,
-                format_func=lambda x: f"{x} ({counts.get(x, 0)})"
-            )
-        with c3:
-            channel_options = sorted([x for x in supply_df["渠道"].unique().tolist() if x])
-            selected_channels = st.multiselect("渠道", channel_options, default=channel_options)
+
+        if apply_filters:
+            st.session_state["supply_keyword"] = keyword_input
+            st.session_state["supply_statuses"] = selected_status_input
+            st.session_state["supply_channels"] = selected_channels_input
+
+        keyword = st.session_state["supply_keyword"]
+        selected_status = st.session_state["supply_statuses"]
+        selected_channels = st.session_state["supply_channels"]
 
         filtered = supply_df.copy()
         if selected_status:
@@ -753,7 +795,7 @@ with tab_supply:
         )
 
 # ===================== SKU库存计划 =====================
-with tab_sku:
+if active_page == "SKU库存计划":
     st.subheader("📋 SKU库存与返单计划")
     if df_calc.empty:
         st.info("暂无SKU库存计划数据。")
@@ -777,7 +819,7 @@ with tab_sku:
         st.dataframe(display, width="stretch", hide_index=True, height=620)
 
 # ===================== 甘特图 =====================
-with tab_gantt:
+if active_page == "供应链甘特图":
     st.subheader("📊 单SKU未来库存销售时间线")
     st.caption(
         "选择SKU并提交后才执行测算。切换下拉选项不会立即触发大量计算，"
@@ -1254,7 +1296,7 @@ with tab_gantt:
                     st.exception(gantt_error)
 
 # ===================== 导入导出 =====================
-with tab_export:
+if active_page == "导入导出":
     st.subheader("📥 数据模板与备份")
 
     sku_template = pd.DataFrame(columns=SKU_COLUMNS)
